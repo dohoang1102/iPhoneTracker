@@ -85,7 +85,8 @@
   NSString* backupPath = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support/MobileSync/Backup/"];
 
   NSFileManager *fm = [NSFileManager defaultManager];
-  NSArray* backupContents = [[NSFileManager defaultManager] directoryContentsAtPath:backupPath];
+  NSError* error;
+  NSArray* backupContents = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:backupPath error:&error];
 
   NSMutableArray* fileInfoList = [NSMutableArray array];
   for (NSString *childName in backupContents) {
