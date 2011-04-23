@@ -12,6 +12,9 @@
   NSWindow *window;
   WebView *webView;
   WebScriptObject* scriptObject;
+    
+    NSString* dbFilePath;
+    NSString* deviceName;
 }
 
 - (void)loadLocationDB;
@@ -21,5 +24,6 @@
 @property (assign) IBOutlet NSWindow *window;
 @property (assign) IBOutlet WebView *webView;
 - (IBAction)openAboutPanel:(id)sender;
+- (IBAction)exportGPX:(id)sender;
 
 @end

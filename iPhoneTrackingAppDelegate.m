@@ -9,6 +9,13 @@
 #import "fmdb/FMDatabase.h"
 #import "parsembdb.h"
 
+@interface iPhoneTrackingAppDelegate ()
+
+-(NSString*) writeISO8601date:(NSDate*)date;
+-(void)saveToGPX:(NSURL*)file;
+
+@end
+
 @implementation iPhoneTrackingAppDelegate
 
 @synthesize window;
@@ -94,7 +101,7 @@
         NSLog(@"No plist file found at '%@'", plistFile);
         continue;
       }
-      NSString* deviceName = [plist objectForKey:@"Device Name"];
+      deviceName = [[plist objectForKey:@"Device Name"] retain];
       NSLog(@"file = %@, device = %@", plistFile, deviceName);  
 
       NSDictionary* mbdb = [ParseMBDB getFileListForPath: newestFolder];
@@ -118,7 +125,7 @@
         continue;
       }
 
-      NSString* dbFilePath = [newestFolder stringByAppendingPathComponent:dbFileName];
+      dbFilePath = [[newestFolder stringByAppendingPathComponent:dbFileName] retain];
 
       loadWorked = [self tryToLoadLocationDB: dbFilePath forDevice:deviceName];
       if (loadWorked) {
@@ -239,6 +246,81 @@
     NSNumber* newValue = [NSNumber numberWithInteger:([existingValue integerValue]+1)];
 
     [buckets setObject: newValue forKey: key];
+}
+
+-(NSString*) writeISO8601date:(NSDate*) date {
+    NSDateFormatter *df = [[NSDateFormatter alloc] init];
+    [df setDateStyle:NSDateFormatterFullStyle];
+    [df setAMSymbol:@""];
+    [df setPMSymbol:@""];
+    [df setDateFormat:@"yyyy-MM-dd'T'HH:mm:ss'Z'"];
+    
+    NSInteger offset = [[NSTimeZone systemTimeZone] secondsFromGMTForDate:date];
+    NSDate* gmt = [date dateByAddingTimeInterval:-offset];
+    
+    NSString* out = [df stringFromDate:gmt];
+    [df release];
+    
+    return out;
+}
+
+- (IBAction)exportGPX:(id)sender {
+    NSSavePanel* savePanel = [NSSavePanel savePanel];
+    [savePanel setAllowedFileTypes:[NSArray arrayWithObject:@"gpx"]];
+    [savePanel beginSheetModalForWindow:self.window completionHandler:^(NSInteger button){
+        switch (button) {
+            case NSFileHandlingPanelOKButton:
+                [self saveToGPX:[savePanel URL]];
+                break;
+            case NSFileHandlingPanelCancelButton:
+                // Do nothing
+                break;
+        }
+    }];
+}
+
+-(void)saveToGPX:(NSURL*)file {
+    [self tryToLoadLocationDB:dbFilePath
+                    forDevice:deviceName
+                   withAction:^BOOL(NSDictionary* buckets){
+                       NSString *template = [NSString stringWithContentsOfFile:[[NSBundle mainBundle] pathForResource:@"GPX-Template"
+                                                                                                               ofType:@"xml"]
+                                                                      encoding:NSUTF8StringEncoding 
+                                                                         error:NULL];
+                       
+                       NSString* trackpointTemplate = @"<trkpt lat=\"LATITUDE\" lon=\"LONGITUDE\"><time>TIMESTAMPT00:00:00Z</time></trkpt>\n";
+                       NSMutableString* trackpoints = [[NSMutableString alloc] initWithCapacity:5000];
+                       
+                       for (NSString* item in buckets) {
+                           NSArray* parts = [item componentsSeparatedByString:@","];
+                           NSString* latitude_string = [parts objectAtIndex:0];
+                           NSString* longitude_string = [parts objectAtIndex:1];
+                           NSString* time_string = [parts objectAtIndex:2];
+                           
+                           if ([time_string isEqualToString:@"All Time"]) {
+                               continue;
+                           }
+                           
+                           NSString* point = [trackpointTemplate stringByReplacingOccurrencesOfString:@"LATITUDE" withString:latitude_string];
+                           point = [point stringByReplacingOccurrencesOfString:@"LONGITUDE" withString:longitude_string];
+                           point = [point stringByReplacingOccurrencesOfString:@"TIMESTAMP" withString:time_string];
+                           
+                           [trackpoints appendString:point];
+                       }
+                       
+                       template = [template stringByReplacingOccurrencesOfString:@"EXPORTNAME"
+                                                                      withString:[NSString stringWithFormat:@"iPhoneTracking export of %@", deviceName]];
+                       template = [template stringByReplacingOccurrencesOfString:@"GENDATE"
+                                                                      withString:[self writeISO8601date:[NSDate date]]];
+                       template = [template stringByReplacingOccurrencesOfString:@"TRACKPOINTS"
+                                                                      withString:trackpoints];
+                       NSError* error;
+                       [template writeToURL:file
+                                 atomically:NO
+                                   encoding:NSUTF8StringEncoding
+                                      error:&error];
+                       return YES;
+                   }];
 }
 
 - (IBAction)openAboutPanel:(id)sender {
