@@ -121,8 +121,8 @@
         NSLog(@"No plist file found at '%@'", plistFile);
         continue;
       }
-      deviceName = [[plist objectForKey:@"Device Name"] retain];
-      NSLog(@"file = %@, device = %@", plistFile, deviceName);  
+      currentDeviceName = [[plist objectForKey:@"Device Name"] retain];
+      NSLog(@"file = %@, device = %@", plistFile, currentDeviceName);  
 
       NSDictionary* mbdb = [ParseMBDB getFileListForPath: newestFolder];
       if (mbdb==nil) {
@@ -145,9 +145,9 @@
         continue;
       }
 
-      dbFilePath = [[newestFolder stringByAppendingPathComponent:dbFileName] retain];
+      locationFilePath = [[newestFolder stringByAppendingPathComponent:dbFileName] retain];
 
-      loadWorked = [self tryToLoadLocationDB: dbFilePath forDevice:deviceName];
+      loadWorked = [self tryToLoadLocationDB: locationFilePath forDevice:currentDeviceName];
       if (loadWorked) {
         break;
       }
@@ -162,7 +162,7 @@
   }
 }
 
-- (BOOL)tryToLoadLocationDB:(NSString*) locationDBPath forDevice:(NSString*) deviceName withAction:(BOOL(^)(NSDictionary* buckets))action {
+- (BOOL)tryToLoadLocationDB:(NSString*) locationDBPath forDevice:(NSString*) deviceName withAction:(BOOL(^)(NSArray* points))action {
     [scriptObject setValue:self forKey:@"cocoaApp"];
     
     FMDatabase* database = [FMDatabase databaseWithPath: locationDBPath];
@@ -172,10 +172,9 @@
         return NO;
     }
     
-    const float precision = 100;
-    NSMutableDictionary* buckets = [NSMutableDictionary dictionary];
+    NSMutableArray* points = [NSMutableArray arrayWithCapacity:5000];
     
-    NSString* queries[] = {@"SELECT * FROM CellLocation;", @"SELECT * FROM WifiLocation;"};
+    NSString* queries[] = {@"SELECT * FROM CellLocation ORDER BY timestamp;", @"SELECT * FROM WifiLocation ORDER BY timestamp;"};
     
     // Temporarily disabled WiFi location pulling, since it's so dodgy. Change to 
     for (int pass=0; pass<1; /*pass<2;*/ pass+=1) {
@@ -188,19 +187,31 @@
             NSNumber* latitude_number = [row objectForKey:@"latitude"];
             NSNumber* longitude_number = [row objectForKey:@"longitude"];
             NSNumber* timestamp_number = [row objectForKey:@"timestamp"];
+            NSDate* timestamp_date = [NSDate dateWithTimeIntervalSince1970:[timestamp_number floatValue] + 31*365.25*24*60*60];
             
-            const float latitude = [latitude_number floatValue];
-            const float longitude = [longitude_number floatValue];
-            const float timestamp = [timestamp_number floatValue];
-            
-            // The timestamps seem to be based off 2001-01-01 strangely, so convert to the 
-            // standard Unix form using this offset
-            const float iOSToUnixOffset = (31*365.25*24*60*60);
-            const float unixTimestamp = (timestamp+iOSToUnixOffset);
-            
-            if ((latitude==0.0)&&(longitude==0.0)) {
+            // Don't bother with empty values
+            if (([latitude_number floatValue]==0.0)&&([longitude_number floatValue]==0.0)) {
                 continue;
             }
+
+            [points addObject:[NSArray arrayWithObjects:latitude_number,longitude_number,timestamp_date, nil]];
+        }
+    }
+    
+    return action(points);
+}
+
+- (BOOL)tryToLoadLocationDB:(NSString*) locationDBPath forDevice:(NSString*) deviceName
+{
+    [self tryToLoadLocationDB:locationDBPath forDevice:deviceName withAction:^BOOL(NSArray *points) {
+        // Put into buckets
+        const float precision = 100;
+        NSMutableDictionary* buckets = [NSMutableDictionary dictionary];
+        for (NSArray* point in points) {
+            const float latitude = [[point objectAtIndex:0] floatValue];
+            const float longitude = [[point objectAtIndex:1] floatValue];
+            const float unixTimestamp = [[point objectAtIndex:2] timeIntervalSince1970];
+            
             
             const float weekInSeconds = (7*24*60*60);
             const float timeBucket = (floor(unixTimestamp/weekInSeconds)*weekInSeconds);
@@ -217,14 +228,8 @@
             [self incrementBuckets: buckets forKey: allKey];
             [self incrementBuckets: buckets forKey: timeKey];
         }
-    }
-    
-    return action(buckets);
-}
-
-- (BOOL)tryToLoadLocationDB:(NSString*) locationDBPath forDevice:(NSString*) deviceName
-{
-    [self tryToLoadLocationDB:locationDBPath forDevice:deviceName withAction:^BOOL(NSDictionary *buckets) {
+        
+        // Process as before
         NSMutableArray* csvArray = [[[NSMutableArray alloc] init] autorelease];
         
         [csvArray addObject: @"lat,lon,value,time\n"];
@@ -300,9 +305,9 @@
 }
 
 -(void)saveToGPX:(NSURL*)file {
-    [self tryToLoadLocationDB:dbFilePath
-                    forDevice:deviceName
-                   withAction:^BOOL(NSDictionary* buckets){
+    [self tryToLoadLocationDB:locationFilePath
+                    forDevice:currentDeviceName
+                   withAction:^BOOL(NSArray* points){
                        NSString *template = [NSString stringWithContentsOfFile:[[NSBundle mainBundle] pathForResource:@"GPX-Template"
                                                                                                                ofType:@"xml"]
                                                                       encoding:NSUTF8StringEncoding 
@@ -311,34 +316,33 @@
                        NSString* trackpointTemplate = @"<trkpt lat=\"LATITUDE\" lon=\"LONGITUDE\"><time>TIMESTAMPT00:00:00Z</time></trkpt>\n";
                        NSMutableString* trackpoints = [[NSMutableString alloc] initWithCapacity:5000];
                        
-                       for (NSString* item in buckets) {
-                           NSArray* parts = [item componentsSeparatedByString:@","];
-                           NSString* latitude_string = [parts objectAtIndex:0];
-                           NSString* longitude_string = [parts objectAtIndex:1];
-                           NSString* time_string = [parts objectAtIndex:2];
+                       NSDate* lastDate = nil;
+                       for (NSArray* item in points) {
+                           NSNumber* latitude = [item objectAtIndex:0];
+                           NSNumber* longitude = [item objectAtIndex:1];
+                           NSDate* timestamp = [item objectAtIndex:2];
                            
-                           if ([time_string isEqualToString:@"All Time"]) {
-                               continue;
+                           NSString* point = [trackpointTemplate stringByReplacingOccurrencesOfString:@"LATITUDE" withString:[latitude stringValue]];
+                           point = [point stringByReplacingOccurrencesOfString:@"LONGITUDE" withString:[longitude stringValue]];
+                           point = [point stringByReplacingOccurrencesOfString:@"TIMESTAMP" withString:[self writeISO8601date:timestamp]];
+                           
+                           // there seem to be lots of duplicate timestamps, so skip if we've seen the date before
+                           if (! lastDate || ! [lastDate isEqualToDate:timestamp]) {
+                               [trackpoints appendString:point];
+                               lastDate = timestamp;
                            }
-                           
-                           NSString* point = [trackpointTemplate stringByReplacingOccurrencesOfString:@"LATITUDE" withString:latitude_string];
-                           point = [point stringByReplacingOccurrencesOfString:@"LONGITUDE" withString:longitude_string];
-                           point = [point stringByReplacingOccurrencesOfString:@"TIMESTAMP" withString:time_string];
-                           
-                           [trackpoints appendString:point];
                        }
                        
                        template = [template stringByReplacingOccurrencesOfString:@"EXPORTNAME"
-                                                                      withString:[NSString stringWithFormat:@"iPhoneTracking export of %@", deviceName]];
+                                                                      withString:[NSString stringWithFormat:@"iPhoneTracking export of %@", currentDeviceName]];
                        template = [template stringByReplacingOccurrencesOfString:@"GENDATE"
                                                                       withString:[self writeISO8601date:[NSDate date]]];
                        template = [template stringByReplacingOccurrencesOfString:@"TRACKPOINTS"
                                                                       withString:trackpoints];
-                       NSError* error;
                        [template writeToURL:file
                                  atomically:NO
                                    encoding:NSUTF8StringEncoding
-                                      error:&error];
+                                      error:NULL];
                        return YES;
                    }];
 }

@@ -40,8 +40,8 @@
   WebView *webView;
   WebScriptObject* scriptObject;
     
-    NSString* dbFilePath;
-    NSString* deviceName;
+    NSString* locationFilePath;
+    NSString* currentDeviceName;
 }
 
 - (void)loadLocationDB;
