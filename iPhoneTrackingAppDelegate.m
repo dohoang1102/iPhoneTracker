@@ -135,92 +135,99 @@
   }
 }
 
+- (BOOL)tryToLoadLocationDB:(NSString*) locationDBPath forDevice:(NSString*) deviceName withAction:(BOOL(^)(NSDictionary* buckets))action {
+    [scriptObject setValue:self forKey:@"cocoaApp"];
+    
+    FMDatabase* database = [FMDatabase databaseWithPath: locationDBPath];
+    [database setLogsErrors: YES];
+    BOOL openWorked = [database open];
+    if (!openWorked) {
+        return NO;
+    }
+    
+    const float precision = 100;
+    NSMutableDictionary* buckets = [NSMutableDictionary dictionary];
+    
+    NSString* queries[] = {@"SELECT * FROM CellLocation;", @"SELECT * FROM WifiLocation;"};
+    
+    // Temporarily disabled WiFi location pulling, since it's so dodgy. Change to 
+    for (int pass=0; pass<1; /*pass<2;*/ pass+=1) {
+        
+        FMResultSet* results = [database executeQuery:queries[pass]];
+        
+        while ([results next]) {
+            NSDictionary* row = [results resultDict];
+            
+            NSNumber* latitude_number = [row objectForKey:@"latitude"];
+            NSNumber* longitude_number = [row objectForKey:@"longitude"];
+            NSNumber* timestamp_number = [row objectForKey:@"timestamp"];
+            
+            const float latitude = [latitude_number floatValue];
+            const float longitude = [longitude_number floatValue];
+            const float timestamp = [timestamp_number floatValue];
+            
+            // The timestamps seem to be based off 2001-01-01 strangely, so convert to the 
+            // standard Unix form using this offset
+            const float iOSToUnixOffset = (31*365.25*24*60*60);
+            const float unixTimestamp = (timestamp+iOSToUnixOffset);
+            
+            if ((latitude==0.0)&&(longitude==0.0)) {
+                continue;
+            }
+            
+            const float weekInSeconds = (7*24*60*60);
+            const float timeBucket = (floor(unixTimestamp/weekInSeconds)*weekInSeconds);
+            
+            NSDate* timeBucketDate = [NSDate dateWithTimeIntervalSince1970:timeBucket];
+            
+            NSString* timeBucketString = [timeBucketDate descriptionWithCalendarFormat:@"%Y-%m-%d" timeZone:nil locale:nil];
+            
+            const float latitude_index = (floor(latitude*precision)/precision);  
+            const float longitude_index = (floor(longitude*precision)/precision);
+            NSString* allKey = [NSString stringWithFormat:@"%f,%f,All Time", latitude_index, longitude_index];
+            NSString* timeKey = [NSString stringWithFormat:@"%f,%f,%@", latitude_index, longitude_index, timeBucketString];
+            
+            [self incrementBuckets: buckets forKey: allKey];
+            [self incrementBuckets: buckets forKey: timeKey];
+        }
+    }
+    
+    return action(buckets);
+}
+
 - (BOOL)tryToLoadLocationDB:(NSString*) locationDBPath forDevice:(NSString*) deviceName
 {
-  [scriptObject setValue:self forKey:@"cocoaApp"];
-    
-  FMDatabase* database = [FMDatabase databaseWithPath: locationDBPath];
-  [database setLogsErrors: YES];
-  BOOL openWorked = [database open];
-  if (!openWorked) {
-    return NO;
-  }
+    [self tryToLoadLocationDB:locationDBPath forDevice:deviceName withAction:^BOOL(NSDictionary *buckets) {
+        NSMutableArray* csvArray = [[[NSMutableArray alloc] init] autorelease];
+        
+        [csvArray addObject: @"lat,lon,value,time\n"];
+        
+        for (NSString* key in buckets) {
+            NSNumber* count = [buckets objectForKey:key];
+            
+            NSArray* parts = [key componentsSeparatedByString:@","];
+            NSString* latitude_string = [parts objectAtIndex:0];
+            NSString* longitude_string = [parts objectAtIndex:1];
+            NSString* time_string = [parts objectAtIndex:2];
+            
+            NSString* rowString = [NSString stringWithFormat:@"%@,%@,%@,%@\n", latitude_string, longitude_string, count, time_string];
+            [csvArray addObject: rowString];
+        }
+        
+        if ([csvArray count]<10) {
+            return NO;
+        }
+        
+        NSString* csvText = [csvArray componentsJoinedByString:@"\n"];
+        
+        id scriptResult = [scriptObject callWebScriptMethod: @"storeLocationData" withArguments:[NSArray arrayWithObjects:csvText,deviceName,nil]];
+        if(![scriptResult isMemberOfClass:[WebUndefined class]]) {
+            NSLog(@"scriptResult='%@'", scriptResult);
+        }
+        return YES;
+    }];
 
-  const float precision = 100;
-  NSMutableDictionary* buckets = [NSMutableDictionary dictionary];
-
-  NSString* queries[] = {@"SELECT * FROM CellLocation;", @"SELECT * FROM WifiLocation;"};
-  
-  // Temporarily disabled WiFi location pulling, since it's so dodgy. Change to 
-  for (int pass=0; pass<1; /*pass<2;*/ pass+=1) {
-  
-    FMResultSet* results = [database executeQuery:queries[pass]];
-
-    while ([results next]) {
-      NSDictionary* row = [results resultDict];
-
-      NSNumber* latitude_number = [row objectForKey:@"latitude"];
-      NSNumber* longitude_number = [row objectForKey:@"longitude"];
-      NSNumber* timestamp_number = [row objectForKey:@"timestamp"];
-
-      const float latitude = [latitude_number floatValue];
-      const float longitude = [longitude_number floatValue];
-      const float timestamp = [timestamp_number floatValue];
-      
-      // The timestamps seem to be based off 2001-01-01 strangely, so convert to the 
-      // standard Unix form using this offset
-      const float iOSToUnixOffset = (31*365.25*24*60*60);
-      const float unixTimestamp = (timestamp+iOSToUnixOffset);
-      
-      if ((latitude==0.0)&&(longitude==0.0)) {
-        continue;
-      }
-      
-      const float weekInSeconds = (7*24*60*60);
-      const float timeBucket = (floor(unixTimestamp/weekInSeconds)*weekInSeconds);
-      
-      NSDate* timeBucketDate = [NSDate dateWithTimeIntervalSince1970:timeBucket];
-
-      NSString* timeBucketString = [timeBucketDate descriptionWithCalendarFormat:@"%Y-%m-%d" timeZone:nil locale:nil];
-
-      const float latitude_index = (floor(latitude*precision)/precision);  
-      const float longitude_index = (floor(longitude*precision)/precision);
-      NSString* allKey = [NSString stringWithFormat:@"%f,%f,All Time", latitude_index, longitude_index];
-      NSString* timeKey = [NSString stringWithFormat:@"%f,%f,%@", latitude_index, longitude_index, timeBucketString];
-
-      [self incrementBuckets: buckets forKey: allKey];
-      [self incrementBuckets: buckets forKey: timeKey];
-    }
-  }
-  
-  NSMutableArray* csvArray = [[[NSMutableArray alloc] init] autorelease];
-  
-  [csvArray addObject: @"lat,lon,value,time\n"];
-
-  for (NSString* key in buckets) {
-    NSNumber* count = [buckets objectForKey:key];
-
-    NSArray* parts = [key componentsSeparatedByString:@","];
-    NSString* latitude_string = [parts objectAtIndex:0];
-    NSString* longitude_string = [parts objectAtIndex:1];
-    NSString* time_string = [parts objectAtIndex:2];
-
-    NSString* rowString = [NSString stringWithFormat:@"%@,%@,%@,%@\n", latitude_string, longitude_string, count, time_string];
-    [csvArray addObject: rowString];
-  }
-
-  if ([csvArray count]<10) {
-    return NO;
-  }
-  
-  NSString* csvText = [csvArray componentsJoinedByString:@"\n"];
-  
-  id scriptResult = [scriptObject callWebScriptMethod: @"storeLocationData" withArguments:[NSArray arrayWithObjects:csvText,deviceName,nil]];
-	if(![scriptResult isMemberOfClass:[WebUndefined class]]) {
-		NSLog(@"scriptResult='%@'", scriptResult);
-  }
-
-  return YES;
+   return YES;
 }
 
 - (void) incrementBuckets:(NSMutableDictionary*)buckets forKey:(NSString*)key
